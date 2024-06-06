@@ -6,10 +6,11 @@ The ReptileDB project consists of three different components:
 2. API - the middleware API for bridging the backend database with the front-end, and
 3. Front End - the application that presents and manages the data.
 
-This repo contains the database.
+This repo contains the database and the API.
 
 *./data* - contains the data file snapshots as provided by Peter Uetz.
-*./src* - contains the code to transform and load the data into the database.
+*./db* - contains the code to transform and load the data from TXT files to the database.
+*./api* - contains the code to be executed on server to run the API server.
 *./docs* - contains the output reports documenting the process for sharing on github.io
 
 This project was originally created as part of VCU Senior Design/Capstone project 24-307.
