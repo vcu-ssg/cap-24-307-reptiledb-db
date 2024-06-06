@@ -22,4 +22,5 @@ fix_sql:
 	python fix_db_wrappers.py < reptiledb.dump > reptiledb.to_mysql
 
 load_mysql:
+	mysql -p -e "DROP DATABASE IF EXISTS reptiledb; CREATE DATABASE reptiledb;"
 	mysql -p -D reptiledb < reptiledb.to_mysql
