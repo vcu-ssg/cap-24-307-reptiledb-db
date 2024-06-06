@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "reptiledb-db"
+version = "0.1.0"
+description = ""
+authors = ["John Leonard <john@lowkeylabs.com>"]
+package-mode = false
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+matplotlib = "^3.8.2"
+plotly = "^5.18.0"
+jupyter = "^1.0.0"
+chardet = "^5.2.0"
+loguru = "^0.7.2"
+sqlalchemy = "^2.0.23"
+jsonify = "^0.5"
+flask = "^3.0.0"
+python-dotenv = "^1.0.0"
+pyyaml = "^6.0.1"
+mysql-connector-python = "^8.2.0"
+pymysql = "^1.1.0"
+waitress = "^3.0.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

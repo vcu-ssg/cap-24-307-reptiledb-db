@@ -1,0 +1,10 @@
+project:
+  output-dir: ../docs
+
+format:
+    html:
+        theme: cosmos
+        toc: true
+        embed-resources: true
+        code-copy: true        
+

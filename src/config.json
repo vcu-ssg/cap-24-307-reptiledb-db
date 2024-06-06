@@ -1,0 +1,6 @@
+{
+    "database" : "../data/reptile_database_2023_09.txt",
+    "bibliography" : "../data/reptile_database_bibliography_2023_09.txt",
+
+    "db_testing_flag" : false
+}

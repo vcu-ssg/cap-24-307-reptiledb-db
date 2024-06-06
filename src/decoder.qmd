@@ -1,0 +1,1403 @@
+---
+title: "Decoding the reptile database"
+author: John Leonard
+date: last-modified
+---
+
+Decoding the reptile database, especially figuring out how to extract the contents is tricky.  
+
+Through this QMD we'll play a process of discovery, unpacking data as necessary.  
+
+When we're done, we'll have the python code we need to extract these data and push them into a database.
+
+# References and tools
+
+To get started you'll need to get all these tools set up.
+
+### Python, Poetry and quarto
+
+1. <https://github.com/vcu-ssg/ssg-quarto-python-setup>
+
+
+### Sqlite3 and tools
+
+1. <https://www.sqlitetutorial.net/download-install-sqlite/>
+1. I use choco.
+    a. choco install sqlite
+    a. choco install sqlite.shell
+
+### Detailed tutorial for python, sqllite, sqlalchemy and flask
+
+1. <https://realpython.com/python-sqlite-sqlalchemy/>
+
+
+# Exploring the reptile database TXT files.
+
+We're provided with two TXT files, each loaded with encoded information.  We need to decode these files, clean
+them up and push them into a database.
+
+For this analysis, copies of the original files are stored in this directory alongside the QMD files.
+
+```{python}
+import os
+import json
+from utils import load_file
+from loguru import logger
+from dotenv import load_dotenv
+```
+
+Load file names and testing flags from configuration file.
+
+```{python}
+def load_config(file_path):
+    with open(file_path, 'r') as file:
+        return json.load(file)
+
+config_path = os.path.join("./", 'config.json')
+config = load_config(config_path)
+source_database_txt  = config['database']
+source_bibliography_txt = config['bibliography']
+
+Testing = config["db_testing_flag"];
+
+## source_database_txt = "reptile_database_2023_09.txt"
+## source_bibliography_txt = "reptile_database_bibliography_2023_09.txt"
+
+```
+
+Load the database credentials from a .ENV file stored OUTSIDE the repo.
+
+```{python}
+config_map = {
+    'user':'REPTILEDB_USER',
+    'password':'REPTILEDB_PASSWORD',
+    'host':'REPTILEDB_HOST',
+    'database':'REPTILEDB_DB_NAME'
+}
+# load and store credentials
+load_dotenv()
+config = {}
+for key in config_map.keys():
+    config[key] = os.getenv(config_map[key])
+flag = False
+for param in config.keys():
+    if config[param] is None:
+        flag = True
+        print(f"Missing {config_map[param]} in .env file")
+
+# build a sqlalchemy engine string
+mysql_uri = f"mysql+pymysql://{config['user']}:{config['password']}@{config['host']}/{config['database']}"
+sqlite_uri = f"sqlite:///reptile.db"
+
+## Engine_URI determines where the data are stored.
+## SQLITE is much faster and good for local use and debugging.
+## Mysql will store data on CMSC508.  The current loading strategy is really slow.
+## It might be better to store to SQLITE, dump SQL and load from DUMP to MySQL.
+
+## engine_uri = mysql_uri
+engine_uri = sqlite_uri
+
+```
+
+## Load the files
+
+```{python}
+raw_db = load_file( source_database_txt )
+raw_bib = load_file( source_bibliography_txt )
+```
+
+Metrics about the database file
+
+```{python}
+#| echo: false
+print(f"""
+file: {source_database_txt}
+rows: {len(raw_db)}
+cols: {len(raw_db[0])}
+""")
+```
+
+And the bibliography file.
+
+```{python}
+#| echo: false
+print(f"""
+file: {source_bibliography_txt}
+rows: {len(raw_bib)}
+cols: {len(raw_bib[0])}
+""")
+```
+
+## First pass over the TXT files
+
+### Reptile DB - identifying columns
+
+Let's look at the first row.
+
+```{python}
+db_names = []
+for i,field in enumerate(raw_db[0]):
+    print(f"col{i:02}: {field}")
+    db_names.append(f"col{i:02}")
+
+```
+
+OK, now it's time to name the columns
+
+```{python}
+db_names = [
+    'Higher Taxa Species', 
+    'subspecies_1', 
+    'subspecies_2', 
+    'subspecies_finder', 
+    'subspecies_year', 
+    'col05', 
+    'Synonym (tab-delimited)', 
+    'col07', 
+    'Common Names (encoded)', 
+    'Distribution', 
+    'Comments (encoded)', 
+    'Diagnosis (encoded)', 
+    'Types (encoded)', 
+    'external links (encoded)', 
+    'biblography ids (encoded)', 
+    'Etymology', 
+    'col16',
+    'col17', 
+    'Reproduction'
+    ]
+```
+
+Now let's align the names with the data to see what we get.
+
+```{python}
+for i,field in enumerate(raw_db[0]):
+    print(f"{db_names[i]:>25} : {field}")
+```
+
+Looking good!  Next steps:
+
+1. name the unknown columns,
+2. unpack encoded links into sublists.
+3. consider creating objects for each row.
+4. Fire up SQLAlchemy to connect objects to database
+5. Unpack rows and load the database!
+
+## Bibliography file
+
+Let's look at the first row.
+
+```{python}
+bib_names = []
+for i,field in enumerate(raw_bib[0]):
+    print(f"col{i:02}: {field}")
+    bib_names.append(f"col{i:02}")
+
+```
+
+OK, now it's time to name the rows.
+
+```{python}
+bib_names = [
+    'bib_id', 
+    'bib_authors', 
+    'bib_year', 
+    'bib_title', 
+    'bib_journal', 
+    'bib_url'
+]
+```
+
+Now let's align the names with the data to see what we get.
+
+```{python}
+for i,field in enumerate(raw_bib[0]):
+    print(f"{bib_names[i]:>25} : {field}")
+```
+
+# Data Cleaning exploring and cleaning
+
+After working with the data, we've seen lots of messiness.  In the sections below present the messiness and would like guidance on how to clean it up.
+
+
+```{python}
+#| echo: false
+# These helpers are used later.  They are not echoed out.
+def show_values(description,values,top=7,bot=7 ):
+    item_count = len(values)
+    max_item_length = 0
+    for value in values:
+        max_item_length = max( max_item_length,len(value) )
+    print(description)
+    print(f"Number of unique rows: {item_count}")
+    print(f"Longest row: {max_item_length}")
+    for i in range(0,min(top,item_count)):
+        print(f"{i+1:6}. {values[i].encode('utf-8')}")
+    print("...")
+    if item_count>top+bot:
+        for i in range(item_count-bot,item_count):
+            print(f"{i+1:6}. {values[i].encode('utf-8')}")
+
+def show_column( description,items,col_id,sort=True ):
+    col_set = set()  # Initialize an empty set to store unique values
+    for i,row in enumerate(items):
+        col_set.add(row[col_id])
+    if sort:
+        col_list = sorted(list(col_set))
+    else:
+        col_list = list(col_set)
+    show_values(description,col_list,7,7)
+```
+
+## Initial cleanup
+
+Let's do some final cleanup on both lists, removing leading and trailing whitespace,
+and removing any trailing "\"
+
+```{python}
+
+def clean_all_rows(dblist):
+    for row_index in range(len(dblist)):
+        for field_index in range(len(dblist[row_index])):
+            field = dblist[row_index][field_index]
+            oldfield = field
+            field = field.strip()
+            while field.endswith("\\"):
+                field = field[:-1]
+            # Assign the modified field back to the original position in dblist
+            dblist[row_index][field_index] = field
+    return dblist
+
+raw_db = clean_all_rows( raw_db )
+raw_bib = clean_all_rows( raw_bib )
+
+```
+
+
+## Taxa (col 0)
+
+* How should higher-taxa be coded?  That is, should we keep it in one entry, or do we separate it out into fields?
+
+My guess is that it should stay whole like it currently is.
+
+Below is a sample drop of a few records of Taxa.
+
+```{python}
+show_column("Taxa", raw_db,0, True )
+```
+
+## Subspecies 1 (col 1)
+
+This all looks OK.
+
+```{python}
+show_column("Subspecies 1", raw_db,1, False )
+```
+
+## Subspecies 2 (col 2)
+
+This all looks OK.
+
+```{python}
+show_column("Subspecies 2", raw_db,2, False )
+```
+
+## Subspecies_finder (col 3)
+
+This all looks OK.
+
+```{python}
+show_column("Subspecies 2", raw_db,3, False )
+```
+
+## Subspecies_year (col 4)
+
+```{python}
+col_set = set()  # Initialize an empty set to store unique values
+for row in raw_db:
+    col_set.add(row[4])
+col_list = sorted(list(col_set), key=lambda x: len(x))
+
+show_values("Subspecies year",col_list,7,7)
+```
+
+Note that there is an incorrect value in here!  Time to track it down and clean it up!
+
+### Cleaning subspecies_year
+
+```{python}
+for i,row in enumerate(raw_db):
+    try:
+        if not int(row[4]) in range(1600,2399):
+            logger.warning(f"Subspecies year (col04): {i:6} : Invalid year")
+    except ValueError as e:
+        logger.warning(f"Subspecies year (col04): {i:6} : {e}")
+
+```
+
+## Column 5
+
+* What is this field?  How is it used?  How should it be coded?
+
+```{python}
+show_column("Unknown Column 5",raw_db,5)
+```
+
+## Synonyms (col 6)
+
+* There is some goofy data inside here!  How do we clean?
+
+Some of the records include references, others don't.
+
+```{python}
+col_set = set()  # Initialize an empty set to store unique values
+for row in raw_db:
+    synonyms = row[6].replace("\u001d","").split("\u000b")
+    for syn in synonyms:
+        col_set.add(syn)
+```
+### A jumble of the first and last records
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: x)
+show_values("Synonyms",col_list,7,7)
+```
+
+### Sorted with the longest at the end
+```{python}
+col_list = sorted(list(col_set), key=lambda x: len(x))
+show_values("Synonyms",col_list,7,7)
+```
+
+### Column 7
+
+* This looks like encoded references of some sort.
+
+
+```{python}
+col_set = set()  # Initialize an empty set to store unique values
+for row in raw_db:
+    synonyms = row[7].replace("\u001d","").split("\u000b")
+    for syn in synonyms:
+        col_set.add(syn)
+```
+### A jumble of the first and last records
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: x)
+show_values("Column 7",col_list,7,7)
+```
+
+### Sorted with the longest at the end
+```{python}
+col_list = sorted(list(col_set), key=lambda x: len(x))
+show_values("Column 7",col_list,7,7)
+```
+
+## Common Names (col 8)
+
+* How should we handle different languages?
+
+I recommend adding a field for language, e.g, EN, SP, GR, etc.
+
+Note however, that some of the leading *xxx:* field names do not represent real languages.  It appears
+that in some cases, these represent the author of the paper that used the particular name.
+
+
+```{python}
+col_set = set()  # Initialize an empty set to store unique values
+for row in raw_db:
+    names = row[8].replace("\u001d","").split("\u000b")
+    for name in names:
+        col_set.add(name)
+```
+### A jumble of the first and last records
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: x)
+show_values("Common names",col_list,7,7)
+```
+
+### Sorted with the longest at the end
+
+* What do we do with these longer strings?
+
+* Are they actually a list of common names?
+
+* If so, should these be separated out and encoded separately?
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: len(x))
+show_values("Common names",col_list,7,7)
+```
+
+
+## Distribution (col 9)
+
+```{python}
+col_set = set()  # Initialize an empty set to store unique values
+for row in raw_db:
+    fields = row[9].replace("\u001d","").split("\u000b")
+    for field in fields:
+        col_set.add(field)
+```
+### A jumble of the first and last records
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: x)
+show_values("Distribution",col_list,7,7)
+```
+
+### Sorted with the longest at the end
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: len(x))
+show_values("Distribution",col_list,7,7)
+```
+
+## Comments (col 10)
+
+```{python}
+col_set = set()  # Initialize an empty set to store unique values
+for row in raw_db:
+    fields = row[10].replace("\u001d","").split("\u000b")
+    for field in fields:
+        col_set.add(field)
+```
+### A jumble of the first and last records
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: x)
+show_values("Comments",col_list,7,7)
+```
+
+### Sorted with the longest at the end
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: len(x))
+show_values("Comments",col_list,7,7)
+```
+
+## Diagnosis (col 11)
+
+```{python}
+col_set = set()  # Initialize an empty set to store unique values
+for row in raw_db:
+    fields = row[11].replace("\u001d","").split("\u000b")
+    for field in fields:
+        col_set.add(field)
+```
+### A jumble of the first and last records
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: x)
+show_values("Diagnosis",col_list,7,7)
+```
+
+### Sorted with the longest at the end
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: len(x))
+show_values("Diagnosis",col_list,7,7)
+```
+### Cleaning diagnoses
+
+```{python}
+
+def odd_code(i, code ):
+    if code in raw_db[i][11]:
+        logger.warning(f"Record: {i:6} : {code.encode('utf-8')}")
+
+
+for i,row in enumerate(raw_db):
+    odd_code(i,"\\\'")
+    raw_db[i][11] = raw_db[i][11].replace("\\\'","'")
+    odd_code(i,"\\\"")
+    raw_db[i][11] = raw_db[i][11].replace("\\\"","'")
+    odd_code(i,"''")
+    raw_db[i][11] = raw_db[i][11].replace("''","")
+    if raw_db[i][11]=="\\":
+        logger.warning(f"Record: {i:6} : {code.encode('utf-8')}")
+        raw_db[i][11] = ""
+    if raw_db[i][11].endswith("\\"):
+        logger.warning(f"Record: {i:6} : {code.encode('utf-8')} ends with")
+        raw_db[i][11] = raw_db[i][11][:-1]
+
+#    raw_db[i][11] = raw_db[i][11].encode('utf-8').replace(b'\xe2\x80\x93',"-".encode('utf-8')).decode()
+
+```
+
+## Type Specimens (col 12)
+
+```{python}
+col_set = set()  # Initialize an empty set to store unique values
+for row in raw_db:
+    fields = row[12].replace("\u001d","").split("\u000b")
+    for field in fields:
+        col_set.add(field)
+```
+### A jumble of the first and last records
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: x)
+show_values("Type specimens",col_list,7,7)
+```
+
+### Sorted with the longest at the end
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: len(x))
+show_values("Type specimens",col_list,7,7)
+```
+
+## External links (col 13)
+
+
+```{python}
+col_set = set()  # Initialize an empty set to store unique values
+for row in raw_db:
+    fields = row[13].replace("\u001d","").split("\u000b")
+    for field in fields:
+        col_set.add(field)
+```
+### A jumble of the first and last records
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: x)
+show_values("External links",col_list,7,7)
+```
+
+### Sorted with the longest at the end
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: len(x))
+show_values("External links",col_list,7,7)
+```
+
+
+## Bibliography (col 14)
+
+* What should we do with missing bibliography numbers?  That is, a number in the reptile database
+that doesn't have a corresponding entry in the bibliography table?
+
+* What should we do with unused bibliography references?
+
+```{python}
+ids_in_db = set()
+for row in raw_db:
+    bibs = row[14].replace("\x1d", "").split("\x0b")
+    for bib in bibs:
+        ids_in_db.add(bib)
+ids_in_biblio = set()
+for row in raw_bib:
+    ids_in_biblio.add(row[0])
+
+ids_not_in_bibliography = ids_in_db - ids_in_biblio
+unused_bibliography_ids = ids_in_biblio - ids_in_db
+
+print(f"Number of ids in DB: {len(ids_in_db)}")
+print(f"Number of ids in bibliography table: {len(ids_in_biblio)}")
+print("")
+print(f"Number of missing bibliography references: {len(ids_not_in_bibliography)}")
+print(f"Number of unused bibliography entries: {len(unused_bibliography_ids)}")
+print("")
+print("")
+show_values("Bibliography",sorted(list(ids_in_db)),7,7)
+```
+
+
+## Etymology (col 15)
+
+* How should these data be cleaned?  
+
+* Is the max length correct? 
+
+### Etymology records sorted.
+
+Note the empty records, odd chars in records, and inconsistent lead characters.
+
+```{python}
+show_column("Etymology",raw_db,15,False)
+```
+### Etymology sorted by length
+
+Only a few are really, really long!
+
+```{python}
+col_set = set()  # Initialize an empty set to store unique values
+for row in raw_db:
+    col_set.add(row[15])
+col_list = sorted(list(col_set), key=lambda x: len(x))
+show_values("Etymology by length",col_list,7,7)
+```
+
+
+## Column 16
+
+```{python}
+show_column("Unknown Column 16",raw_db,16,False)
+```
+
+## Column 17
+
+
+```{python}
+col_set = set()  # Initialize an empty set to store unique values
+for row in raw_db:
+    fields = row[17].replace("\u001d","").split("\u000b")
+    for field in fields:
+        col_set.add(field)
+```
+### A jumble of the first and last records
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: x)
+show_values("Column 17",col_list,7,7)
+```
+
+### Sorted with the longest at the end
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: len(x))
+show_values("Column 17",col_list,7,7)
+```
+
+
+## Reproduction values (col 18)
+
+* How should reproduction be coded or recoded?
+
+* How to handle extra long rows?
+
+```{python}
+show_column("Reproduction",raw_db,18,False)
+```
+
+I see *oviparous*,*ovoviparous*, and *viviparous*.  Some capitalized and others not. Here is a listing of values that don't begin with *ov*:
+
+```{python}
+reproduction_set = set()  # Initialize an empty set to store unique values
+for row in raw_db:
+    if not row[18].lower()[:2] in ['ov','vi']:
+        reproduction_set.add(row[18])
+repro_list = sorted(list(reproduction_set))
+
+show_values("Non ov/vi fields",repro_list,7,7)
+```
+
+## Bib id (col 0)
+
+```{python}
+show_column("Bibliography: bib_id",raw_bib,0,False)
+```
+
+## Bib authors (col 1)
+```{python}
+show_column("bib_authors",raw_bib,1,False)
+```
+
+## Bib year (col 2)
+
+```{python}
+show_column("bib_year",raw_bib,2,True)
+```
+
+### Cleaning bib_year
+
+```{python}
+for i,row in enumerate(raw_bib):
+    try:
+        if not int(row[2]) in range(1600,2399):
+            logger.warning(f"bib year (col02): {i:6} : Invalid year {row[2]}")
+    except ValueError as e:
+        logger.warning(f"Subspecies year (col04): {i:6} : {e}")
+```
+
+## Bib title (col 3)
+
+* There is something definitely wrong here!
+
+```{python}
+col_set = set()  # Initialize an empty set to store unique values
+for row in raw_bib:
+    fields = row[3].replace("\u001d","").split("\u000b")
+    for field in fields:
+        col_set.add(field)
+```
+### A jumble of the first and last records
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: x)
+show_values("External links",col_list,7,7)
+```
+
+### Sorted with the longest at the end
+
+```{python}
+col_list = sorted(list(col_set), key=lambda x: len(x))
+show_values("External links",col_list,7,7)
+```
+
+## Bib journal (col 4)
+```{python}
+show_column("bib_journal",raw_bib,4,False)
+```
+
+## Bib URL (col 5)
+```{python}
+show_column("bib_url",raw_bib,5,False)
+```
+
+
+# Creating and testing the database
+
+Armed with what we learned above, let's load up the database!  Depending on the *engine_uri* setting above
+the data will be stored in a local *sqlite* database, or it may be stored directly to a mysql server.
+
+```{powershell}
+## If you installed sqlite3 correctly, you should be able
+## to run this command:
+
+sqlite3
+
+# .quit will exit the prompt
+
+```
+
+## Create SQLAlchemy objects
+
+Why use SQLAlchemy?  Our final goal is to write an API server that responses to queries and returns JSON objects.
+
+JSON objects are very nice in that they reflect the organization of the data.
+
+However, JSON objects are difficult to reconstruct from a relational database.
+
+By encapsulating the data in an *object-reference model* or *ORM* provided by tools like SQLAlchemy, we can pull JSON objects
+directly from the database using queries.  This will greatly streamling the creation of the back and and more importantly, reduce errors.
+
+The rather long section below defines the objects and relations between objects.
+
+```{python}
+# Create SQLAlchemy objects
+from sqlalchemy import Column, Integer, String, ForeignKey, Table, LargeBinary, UniqueConstraint, Text
+from sqlalchemy import create_engine
+from sqlalchemy.orm import relationship, backref, sessionmaker, Session
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+reptile_biblio = Table(
+    "reptile_biblio",
+    Base.metadata,
+    Column("reptile_id", Integer, ForeignKey("reptiles.id"),index=True),
+    Column("biblio_id", String(30), ForeignKey("bibliography.bib_id"),index=True),
+)
+
+old_reptile_taxa = Table(
+    "reptile_taxa",
+    Base.metadata,
+    Column("reptile_id", Integer, ForeignKey("reptiles.id")),
+    Column("taxa_id", Integer, ForeignKey("taxa.id")),
+)
+
+class Synonym( Base ):
+    __tablename__ = "synonyms"
+
+    id = Column(Integer, primary_key=True, autoincrement=True,index=True)
+    value = Column(String(4096))
+    reptile_id = Column( Integer, ForeignKey("reptiles.id") )
+    
+    def __init__( self, value ):
+        self.value = value[:4096]
+    def __repr__(self):
+        return f"<Synonym(id={self.id}), {self.value}>"
+
+class Column7( Base ):
+    __tablename__ = "column7"
+
+    id = Column(Integer, primary_key=True, autoincrement=True,index=True)
+    value = Column(String(255))
+    reptile_id = Column( Integer, ForeignKey("reptiles.id") )
+    
+    def __init__( self, value ):
+        self.value = value[:255]
+    def __repr__(self):
+        return f"<Synonym(id={self.id}), {self.value}>"
+
+
+class Comment( Base ):
+    __tablename__ = "comments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(8192))
+    reptile_id = Column( Integer, ForeignKey("reptiles.id") )
+    
+    def __init__( self, value ):
+        self.value = str(value).replace("\u001d","")[:8000]
+#        self.value = self.value.encode("utf-8")
+    def __repr__(self):
+        return f"<Comment(id={self.id}), {self.value}>"
+
+class Common_Name( Base ):
+    __tablename__ = "common_names"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(4096))
+    reptile_id = Column( Integer, ForeignKey("reptiles.id") )
+    
+    def __init__( self, value ):
+        self.value = value[:4096]
+    def __repr__(self):
+        return f"<Common_Name(id={self.id}), {self.value}>"
+
+class Distribution( Base ):
+    __tablename__ = "distributions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(4096))
+    reptile_id = Column( Integer, ForeignKey("reptiles.id") )
+    
+    def __init__( self, value ):
+        self.value = value[:4096]
+    def __repr__(self):
+        return f"<Distribution(id={self.id}), {self.value}>"
+
+class Diagnosis( Base ):
+    __tablename__ = "diagnoses"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(Text(65336))
+    reptile_id = Column( Integer, ForeignKey("reptiles.id") )
+    
+    def __init__( self, value ):
+        self.value = str(value)[:65335]
+    def __repr__(self):
+        return f"<Diagnosis(id={self.id}), {self.value}>"
+
+class External_Link( Base ):
+    __tablename__ = "external_links"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(4096))
+    reptile_id = Column( Integer, ForeignKey("reptiles.id") )
+    
+    def __init__( self, value ):
+        self.value = value[:4096]
+    def __repr__(self):
+        return f"<External_Link(id={self.id}), {self.value}>"
+
+class Specimen( Base ):
+    __tablename__ = "specimens"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(9000))
+    reptile_id = Column( Integer, ForeignKey("reptiles.id") )
+    
+    def __init__( self, value ):
+        self.value = str(value).replace("\u001d","")[:8900]
+    def __repr__(self):
+        return f"<Specimen(id={self.id}), {self.value}>"
+
+class Etymology( Base ):
+    __tablename__ = "etymologies"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, index=True)
+    value = Column(String(4096))
+    reptile_id = Column( Integer, ForeignKey("reptiles.id") )
+    
+    def __init__( self, value ):
+        self.value = value[:4096]
+    def __repr__(self):
+        return f"<Etymology(id={self.id}), {self.value}>"
+
+
+class Taxa( Base ):
+    __tablename__ = "taxa"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255),index=True,unique=True)
+
+    def __init__( self, cols ):
+        self.value = cols[0][:255]
+    def __repr__(self):
+        return f"<Taxa(id={self.id}), {self.value}>"
+
+    __table_args__ = (
+        UniqueConstraint('value', name='uq_taxa_value'),
+    )
+
+class Reptile(Base):
+    __tablename__ = 'reptiles'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+#remove    higher_taxa_species = Column(String(4096))
+    subspecies_1 = Column(String(255))
+    subspecies_2 = Column(String(255))
+    subspecies_finder = Column(String(255))
+    subspecies_year = Column(Integer)
+    col05 = Column(String(255))
+#remove    synonym_string = Column(String(4096))
+#remove    col07 = Column(Text(65536))
+#remove    common_names_string = Column(String(4096))
+#remove distribution_string = Column(String(4096))
+#remove    comment_string = Column(String(4096))
+#remove    diagnosis_string = Column(String(4096))
+#remove    types_string = Column(String(4096))
+#remove    external_links_string = Column(String(4096))
+#remove    bibliography_ids = Column(String(4096))
+#remove    etymology_string = Column(String(4096))
+    col16 = Column(String(255))
+    col17 = Column(String(255))
+    reproduction = Column(String(2048))
+    bibliography = relationship(
+        "Biblio",secondary=reptile_biblio,back_populates="reptiles"
+    )
+    taxa_id = Column( Integer, ForeignKey("taxa.id") )
+    taxa = relationship('Taxa', foreign_keys=[taxa_id], uselist=False)
+
+    synonyms = relationship("Synonym",backref=backref("reptiles"))
+    column7s = relationship("Column7",backref=backref("reptiles"))
+    comments = relationship("Comment",backref=backref("reptiles"))
+    common_names = relationship("Common_Name",backref=backref("reptiles"))
+    distributions = relationship("Distribution",backref=backref("reptiles"))
+    diagnoses = relationship("Diagnosis",backref=backref("reptiles"))
+    external_links = relationship("External_Link",backref=backref("reptiles"))
+    etymologies = relationship("Etymology",backref=backref("reptiles"))
+    specimens = relationship("Specimen",backref=backref("reptiles"))
+
+    def __init__(self, cols ):
+#remove        self.higher_taxa_species = cols[0]
+        self.subspecies_1 = str(cols[1])
+        self.subspecies_2 = str(cols[2])
+        self.subspecies_finder = str(cols[3])
+        self.subspecies_year = int(cols[4])
+        self.col05 = str(cols[5])
+#remove        self.synonym_string = cols[6]
+#remove        self.col07 = cols[7].replace("\u001d","")[:65000]
+#remove        self.common_names_string = cols[8]
+#remove        self.distribution_string = cols[9]
+#remove        self.comment_string = cols[10]
+#remove        self.diagnosis_string = cols[11]
+#remove        self.types_string = cols[12]
+#remove        self.external_links_string = cols[13]
+#remove        self.bibliography_ids = cols[14]
+#remove        self.etymology_string = cols[15]
+        self.col16 = str(cols[16])
+        self.col17 = str(cols[17])
+        self.reproduction = str(cols[18])
+
+    __table_args__ = (
+        UniqueConstraint('subspecies_1', 'subspecies_2', name='uq_subspecies_1_subspecies_2'),
+    )
+    
+    def __repr__(self):
+        return f"<Reptile(id={self.id}), {self.subspecies_1} {self.subspecies_2}>"
+
+
+class Biblio( Base ):
+    __tablename__ = 'bibliography'
+
+    bib_id = Column(String(30), primary_key=True,index=True )
+    bib_authors = Column(String(5000))
+    bib_year = Column(String(255))
+    bib_title = Column(Text(65536))
+    bib_journal = Column(String(512))
+    bib_url = Column(String(2048))
+    reptiles = relationship("Reptile",secondary=reptile_biblio,back_populates="bibliography")
+
+    def __init__(self, cols ):
+        self.bib_id = cols[0]
+        self.bib_authors = cols[1][:2048]
+        self.bib_year = int(cols[2])
+        self.bib_title = cols[3].replace("\u001d","")[:65000]
+        self.bib_journal = cols[4][:2048]
+        self.bib_url = cols[5][:2048]
+
+    def __repr__(self):
+        return f"<Biblio(bib_id={self.bib_id}), {self.bib_authors} {self.bib_year}>"
+
+```
+
+
+Now, let's create a database connection and populate the database
+
+```{python}
+
+# engine_uri is set above
+
+engine = create_engine(engine_uri)
+Base.metadata.create_all(engine)
+
+Session = sessionmaker()
+Session.configure(bind=engine)
+session = Session()
+
+```
+
+First, COMPLETELY load the bibliography
+
+```{python}
+## Load bibliography.
+
+def load_biblio( session, row ):
+    """ Load bibliography record into table """
+    biblio = Biblio( row )
+    session.add(biblio)
+#    session.commit()
+
+session.query(Biblio).delete()
+
+for i,row in enumerate(raw_bib):
+    try:
+        load_biblio( session, row )
+    except ValueError as e:
+        logger.warning(f"bib record {i}: {e}")
+
+    if (False and not i<100):
+        break
+
+session.commit()
+
+```
+
+Load the reptile records.  Error messages will show biblio ID found 
+in a reptile record that don't match up with any records in the bibliography table.
+
+This code gets modified over time as we refactor each record, pulling pieces 
+into their own tables.
+
+```{python}
+## Load reptiles
+
+def clean_field( field ):
+    field = field.strip()
+    if field.endswith("\\"):
+        while field.endswith("\\"):
+            field = field[:-1]
+    return field
+
+
+def load_reptile( session, row ):
+    """ load a reptile into table """
+
+    reptile = Reptile( row )
+    session.add(reptile)
+ #   session.commit()
+
+    # Clean up and split the bibliographies
+    bibs = row[14].replace("\x1d", "").split("\x0b")
+    # Loop over array.
+    for bib in bibs:
+        # check if ID is found in biblio DB
+        found_bib = (
+            session.query(Biblio)
+            .filter(Biblio.bib_id == bib)
+            ).one_or_none()
+        # If not found, we just found a bug in the original DB
+        if found_bib is None:
+            pass
+##            logger.debug(f"Bib ID :{bib}: not found in biblio table" )
+
+        # If found, make the connections between the records.
+        # This represents the SQLAlchemy magic.
+        else:
+            reptile.bibliography.append(found_bib)
+            found_bib.reptiles.append(reptile)
+#            session.commit()
+
+    # Working with higher-taxa
+    higher_taxa = row[0]
+#    logger.debug(f"Searching for {higher_taxa}")
+    found_taxa = (session.query(Taxa).filter(Taxa.value==higher_taxa)).one_or_none()
+    # If not found, add a new record to taxa table
+    if found_taxa is None:
+        logger.debug(f"Adding new taxa: {higher_taxa}")
+        found_taxa = Taxa( row )
+        session.add(found_taxa)
+#        session.commit()
+    # connect reptile and taxa
+    reptile.taxa = found_taxa
+#    found_taxa.reptiles.append( reptile )
+
+    # Working with synonyms
+    synonyms = row[6].replace("\u001d","").split("\u000b")
+    if synonyms is not None:
+        for syn in synonyms:
+            syn = clean_field(syn)
+            if len(syn)>0:
+                new_syn = Synonym( syn )
+                session.add(new_syn)
+                reptile.synonyms.append( new_syn )
+
+    # Working with synonyms
+    col7 = row[7].replace("\u001d","").split("\u000b")
+    if col7 is not None:
+        for item in col7:
+            item = clean_field(item)
+            if len(item)>0:
+                field = Column7( item )
+                session.add(field)
+                reptile.column7s.append( field )
+
+    # Working with common names
+    names = row[8].replace("\u001d","").split("\u000b")
+    if names is not None:
+        for name in names:
+            name = clean_field(name)
+            if len(name)>0:
+                new_name = Common_Name( name )
+                session.add(new_name)
+                reptile.common_names.append( new_name )
+
+    # Working with distributions
+    distributions = row[9].replace("\u001d","").split("\u000b")
+    if distributions is not None:
+        for dist in distributions:
+            dist = clean_field(dist)
+            if len(dist)>0:
+                new_dist = Distribution( dist )
+                session.add(new_dist)
+                reptile.distributions.append( new_dist )
+
+    # Working with comments
+    comments = row[10].replace("\u001d","").split("\u000b")
+    if comments is not None:
+        for comm in comments:
+            comm = clean_field(comm)
+            if len(comm)>0:
+                new_comm = Comment( comm )
+                session.add(new_comm)
+#                session.commit()
+                reptile.comments.append( new_comm )
+
+    # Working with diagnoses
+    diagnoses = row[11].replace("\u001d","").split("\u000b")
+    if diagnoses is not None:
+        for diag in diagnoses:
+            diag = clean_field(diag)
+            if len(diag)>0:
+                new_diag = Diagnosis( diag )
+                session.add(new_diag)
+                reptile.diagnoses.append( new_diag )
+
+    # Working with external_links
+    urls = row[13].replace("\u001d","").split("\u000b")
+    if urls is not None:
+        for url in urls:
+            url = clean_field(url)
+            if len(url)>0:
+                new_url = External_Link( url )
+                session.add(new_url)
+                reptile.external_links.append( new_url )
+
+    # Working with etymologies
+    etymologies = row[15].replace("\u001d","").split("\u000b")
+    if etymologies is not None:
+        for ety in etymologies:
+            ety = clean_field(ety)
+            if len(ety)>0:
+                new_ety = Etymology( ety )
+                session.add(new_ety)
+                reptile.etymologies.append( new_ety )
+
+    # Working with specimens
+    specimens = row[12].replace("\u001d","").split("\u000b")
+    if specimens is not None:
+        for spec in specimens:
+            spec = clean_field(spec)
+            if len(spec)>0:
+                new_spec = Specimen( spec )
+                session.add(new_spec)
+                reptile.specimens.append( new_spec )
+
+
+#    session.commit()
+
+# Clear out the old table before loading.  This minimizes primary key errors
+
+logger.debug(f"rows to process: {len(raw_db)}")
+
+for i,row in enumerate(raw_db):
+    try:
+        load_reptile( session, row )
+    except ValueError as e:
+        logger.warning(f"reptile record {i}: {e}")
+
+    if i % 500 == 0:
+#        logger.debug(f"{i:5}")
+        session.commit()
+
+    if (Testing and (not i<200)):
+        logger.warning(f"TESTING: subset of records loaded.  See line referenced by this warning.")
+        break
+
+
+session.commit()
+
+```
+
+## Exploring decoding
+
+The following sections are used for help identify opportunities for additional decodes and to make sure
+that we're unpacking each of the fields correctly.
+
+Study the individual elements in each list.  Note that many of the fields encode a descriptor,
+for example, *elevation*, *photo*, *location*, etc.
+
+In the interest of *hardening* the database:
+
+* should we more explicitly unpack these types, ensuring
+that users can only select from a limited number?  Or,
+
+* should we leave these fields fast and loose so that new fields can be added on the fly.
+
+See: <https://realpython.com/python-sqlite-sqlalchemy/#working-with-sqlalchemy-and-python-objects>
+
+
+```{python}
+#| echo: false
+
+first_reptile = session.query(Reptile).first()
+
+# Dump a single record to JSON
+def sqlalchemy_object_to_dict(obj):
+    ignore_fields = ['bibliography_ids','taxa_id']
+    if obj is None:
+        return None
+
+    if isinstance(obj, list):
+        return [sqlalchemy_object_to_dict(item) for item in obj]
+
+    if hasattr(obj, '__dict__'):
+        data = obj.__dict__.copy()
+        # Remove private attributes and SQLAlchemy-specific attributes
+        for key in list(data.keys()):
+            if key.startswith('_') or key == 'metadata' or key in ignore_fields:
+                del data[key]
+
+        # Recursively convert nested objects
+        for key, value in data.items():
+            if isinstance(value, list):
+                data[key] = [sqlalchemy_object_to_dict(item) for item in value]
+            elif hasattr(value, '__dict__'):
+                data[key] = sqlalchemy_object_to_dict(value)
+
+        return data
+
+    return obj
+
+    
+def review( f1, f2 ):
+    try:
+        # Code that may raise an AttributeError
+        print( json.dumps(sqlalchemy_object_to_dict( getattr(first_reptile,f1)),indent=4) )
+    except AttributeError as e:
+        # Handle the exception here
+        print(f"An AttributeError occurred: {e}")
+    try:
+        # Code that may raise an AttributeError
+        print( json.dumps(sqlalchemy_object_to_dict( getattr(first_reptile,f2)),indent=4) )
+    except AttributeError as e:
+        # Handle the exception here
+        print(f"An AttributeError occurred: {e}")
+```
+
+### Common names
+
+* How should we restructure this table?
+
+```{python}
+review( "common_names_string","common_names")
+```
+
+### Geographic Distribution
+
+* How should we restructure this table?
+
+```{python}
+review( "distribution_string","distributions")
+```
+
+### Diagnoses
+
+* How should we restructure this table?
+
+```{python}
+review( "diagnosis_string","diagnoses")
+```
+
+### External URLs
+
+* How should we restructure this table?
+
+```{python}
+review( "external_links_string","external_links")
+```
+
+### Etymologies
+
+* How should we restructure this table?
+
+```{python}
+review( "etymology_string","etymologies")
+```
+
+### Type Specimens
+
+```{python}
+review( "types_string","specimens")
+```
+
+
+# Output practice
+
+Now that we've got a database loaded.  Let's experiment with working with the data.
+
+The examples below will help with creation of the API.
+
+## Examples of referencing fields of the ORM
+
+SQLAlchemy uses an object-reference model (ORM).  Without much work, it makes
+it easy to address elements across database tables.
+
+Below are a few examples, printing out the first record of the database.
+
+```{python}
+
+first_reptile = session.query(Reptile).first()
+
+print(first_reptile)
+for field_name in ['subspecies_1','subspecies_2','subspecies_year']:
+    print(f"{field_name:>15s} : {getattr(first_reptile,field_name)}")
+print(f"           Taxa : {first_reptile.taxa.value}")
+print(f"     References :")
+for bib in first_reptile.bibliography:
+    print(f"{bib.bib_id:>15s} : {bib.bib_authors},{bib.bib_year}")
+print(f"       Synonyms :")
+for syn in first_reptile.synonyms:
+    print(f"{syn.id:>15d} : {syn.value}")
+print(f"       Comments :")
+for comm in first_reptile.comments:
+    print(f"{comm.id:>15d} : {comm.value}")
+
+print(f"        Column7 :")
+for comm in first_reptile.column7s:
+    print(f"{comm.id:>15d} : {comm.value}")
+
+```
+
+## Example JSON output.
+
+Write a record out as JSON, simulating a API query.  This offers
+an example of what the API server will return.
+
+We'll be doing TONS of this in the flask API application.
+
+
+```{python}
+
+o = sqlalchemy_object_to_dict(first_reptile)
+
+print( json.dumps(o,indent=4) )
+    
+```
