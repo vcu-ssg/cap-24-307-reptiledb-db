@@ -1,17 +1,21 @@
 from flask import Flask, jsonify, request
-from database import Session
-from models import Reptile, Synonym, Comment, Common_Name, Distribution, Diagnosis, External_Link, Specimen, Etymology, Taxa, Biblio, AdminUser
+from database import get_db_session
 from collections import OrderedDict
-from sqlalchemy import or_
-from sqlalchemy.orm import joinedload
+from sqlalchemy import or_, distinct, create_engine
 from sqlalchemy import distinct
-##from load_data import load_reptile
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import aliased, joinedload, scoped_session, sessionmaker
 from werkzeug.security import check_password_hash
 from flask_cors import CORS  # Import CORS
 
+from models import Base, Reptile, Synonym, Comment, Common_Name, Distribution, Diagnosis, External_Link, Specimen, Etymology, Taxa, Biblio, AdminUser
+##from load_data import load_reptile
+
+
+## Create the flask app 
+
 app = Flask(__name__)
 CORS(app)
+
 
 def unique(items):
     seen = set()
@@ -48,7 +52,7 @@ def serialize_reptile(reptile):
 
 @app.route('/reptiles/<int:reptile_id>', methods=['GET'])
 def get_reptile(reptile_id):
-    session = Session()
+    session = get_db_session()
     reptile = session.query(Reptile).filter(Reptile.id == reptile_id).first()
     if reptile:
         reptile_data = serialize_reptile(reptile)
@@ -67,7 +71,7 @@ def hello():
 
 @app.route('/reptiles/search/<string:query>', methods=['GET'])
 def search_reptiles(query):
-    session = Session()
+    session = get_db_session()
     synonym_alias = aliased(Synonym)  # Creating an alias for the Synonym table to use in the join
 
     # Explicitly joining Reptile with Synonym using an outer join to include reptiles that may not have synonyms
@@ -92,7 +96,7 @@ def search_reptiles(query):
     
 @app.route('/reptiles/search/subspeciesfinder/<string:query>', methods=['GET'])
 def search_reptiles_by_subspecies_finder(query):
-    session = Session()
+    session = get_db_session()
     reptiles = session.query(Reptile).filter(
         Reptile.subspecies_finder.ilike(f"%{query}%")
     ).all()
@@ -107,7 +111,7 @@ def search_reptiles_by_subspecies_finder(query):
     
 @app.route('/reptiles/search/year/<int:year>', methods=['GET'])
 def search_reptiles_by_year(year):
-    session = Session()
+    session = get_db_session()
     reptiles = session.query(Reptile).filter(
         Reptile.subspecies_year == year
     ).all()
@@ -122,7 +126,7 @@ def search_reptiles_by_year(year):
     
 @app.route('/reptiles/search/taxa/<string:taxa_query>', methods=['GET'])
 def search_reptiles_by_taxa(taxa_query):
-    session = Session()
+    session = get_db_session()
     reptiles = session.query(Reptile).join(Taxa).filter(
         Taxa.value.ilike(f"%{taxa_query}%")
     ).all()
@@ -141,7 +145,7 @@ def search_reptiles_by_taxa(taxa_query):
 
 @app.route('/reptiles/search/advanced', methods=['GET'])
 def advanced_search():
-    session = Session()
+    session = get_db_session()
     query = session.query(Reptile)
 
     # Retrieve query parameters
@@ -194,11 +198,12 @@ def advanced_search():
         return jsonify(serialized_results), 200
     else:
         return jsonify({"error": "No results found"}), 404    
+
 #Adding new reptile API call
 @app.route('/reptiles/add', methods=['POST'])
 def add_reptile_api():
     data = request.json
-    session = Session()
+    session = get_db_session()
     try:
         row_data = [
         data.get('taxa'),
@@ -239,7 +244,7 @@ def login():
     # Extract username and password from the request
     username = request.json.get('username')
     password = request.json.get('password')
-    session = Session()
+    session = get_db_session()
 
     if not username or not password:
         return jsonify({"error": "Missing username or password"}), 400
@@ -257,7 +262,7 @@ def login():
 @app.route('/reptiles/update/<int:reptile_id>', methods=['PUT'])
 def update_reptile(reptile_id):
     data = request.json
-    session = Session()
+    session = get_db_session()
     try:
         reptile = session.query(Reptile).filter_by(id=reptile_id).one()
         
@@ -319,7 +324,7 @@ def update_reptile(reptile_id):
 
 @app.route('/reptiles/delete/<int:reptile_id>', methods=['DELETE'])
 def delete_reptile(reptile_id):
-    session = Session()
+    session = get_db_session()
     try:
         reptile = session.query(Reptile).filter_by(id=reptile_id).one()
         session.delete(reptile)
