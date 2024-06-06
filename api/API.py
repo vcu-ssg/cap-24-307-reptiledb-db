@@ -3,12 +3,30 @@ from database import get_db_session
 from collections import OrderedDict
 from sqlalchemy import or_, distinct, create_engine
 from sqlalchemy import distinct
+from sqlalchemy import Column, Integer, String, ForeignKey, Table, LargeBinary, UniqueConstraint, Text
 from sqlalchemy.orm import aliased, joinedload, scoped_session, sessionmaker
 from werkzeug.security import check_password_hash
 from flask_cors import CORS  # Import CORS
 
-from models import Base, Reptile, Synonym, Comment, Common_Name, Distribution, Diagnosis, External_Link, Specimen, Etymology, Taxa, Biblio, AdminUser
+from models import Base, Reptile, Synonym, Comment, Common_Name, Distribution, Diagnosis, External_Link, Specimen, Etymology, Taxa, Biblio
 ##from load_data import load_reptile
+
+class AdminUser(Base):
+    __tablename__ = 'admin_users'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String, unique=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+
+    def __init__(self, username, password):
+        self.username = username
+        self.hashed_password = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.hashed_password, password)
+
+    def __repr__(self):
+        return f"<AdminUser(username={self.username})>"
 
 
 ## Create the flask app 
